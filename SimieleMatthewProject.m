@@ -11,16 +11,20 @@ end
 
 %% Do Lowpass to Band Stop Filter Calculations from Report
 % From Digital Filter Transformations Handout
-p = tan(0.1*pi) * tan(0.1*pi);
-lam = cos(0.24*pi) / cos(0.1*pi);
+fs = 1e6;
+w_p = 0.2*pi;
+wc_1 = (70000 * 2 * pi) / fs; wc_2 = (170000 * 2 * pi) / fs;
+p = tan((wc_2 - wc_1) / 2) * tan(w_p/2);
+lam = cos((wc_2 + wc_1) / 2) / cos((wc_2 - wc_1) / 2);
 
 %% Define Analog Lowpass Filter
 
-w_p = 0.2*pi;
-w_s = 2*atan((p*sin(0.18*pi)) / (cos(0.18*pi) - lam));
+w_s1 = 2*atan((p*sin(0.18*pi)) / (cos(0.18*pi) - lam));
+w_s2 = 2*atan((p*sin(0.24*pi)) / (cos(0.24*pi) - lam));
+w_s = min(abs(w_s1), abs(w_s2));
 % w_s = 0.400059*pi;
 fs = 1e6;
-Rp = 0.1; % Passband Ripple in dB, for type 2 this technically does not matter
+Rp = 2; % Passband Ripple in dB, for type 2 this technically does not matter
 Rs = 45; % Stopband Attenuation in dB
 omega_p = tan(w_p/2); % Use an arbitrary Fs = 0.5 for the bilinear 
                       % transform
@@ -35,12 +39,17 @@ k = omega_p/omega_s;
 k1 = delt/sqrt(A^2 - 1);
 
 n = ceil(acosh(1/k1) / acosh(1/k));
+% After some testing to get rid of the extra peak in the passband after 
+% filter implementation a 5th order lowpass filter was used.
 
+disp(['Low-Pass Filter Order Chosen: ', num2str(n)]); 
+disp(['Band-Stop Filter Order: ', num2str(n*2)]); 
 % Generate Analog Chebyshev Type II Filter 
 [za,pa,ka] = cheby2(n,Rs,omega_s, 's');
 plot_pz(save_fig, 's', za, pa, {'Analog Low Pass Filter', 'Pole/Zero Plot'})
 [analog_num, analog_den] = zp2tf(za,pa,ka);
-plot_impulse(save_fig, 's', analog_num, analog_den, {'Analog Low Pass Filter', 'Filter Impulse Response'})
+% Some versions of Matlab didn't like tf which is required to plot this
+% plot_impulse(save_fig, 's', analog_num, analog_den, {'Analog Low Pass Filter', 'Filter Impulse Response'})
 
 [h, w_out] = freqs(analog_num,analog_den,4096);
 fig_fr = figure('Name', 'Analog Low Pass Frequency Response'); 
@@ -145,6 +154,16 @@ C(:,:) = C(indexGainDescend,:);
 % D is always one in this case so leave it alone here
 L = ceil( (log2(noise_out * 10^(7.2)) + 3) / 2 );
 
+T = array2table(horzcat(reshape(A,[],size(A,3),1)', B,C,D),...
+    'VariableNames',{'a11','a12','a21', 'a22', 'b1', 'b2', 'c1', 'c2', 'd'});
+
+disp('----------------------------------------------------------------------------');
+disp('Filter Coefficients Floating Point')
+disp(T)
+disp('----------------------------------------------------------------------------');
+
+disp(['Number of Bits Used in Fixed Point Representation: ', num2str(L+1)]);
+
 %% Convert the state matricies to fixed point represetation
 % Note float used here is the decimal representation of the fixed point
 % number. This is limited to L+1 bits where the +1 bit represents the signs
@@ -154,6 +173,14 @@ L = ceil( (log2(noise_out * 10^(7.2)) + 3) / 2 );
 % Since D is 1 for all of the cascades this does not need to be converted
 % to fixed there will technically be no "multiplier" d
 [k_fixed, k_float] = convert_to_fixed(k,L);
+
+T_fixed = array2table(horzcat(reshape(A_float,[],size(A,3),1)', B_float,C_float,D),...
+    'VariableNames',{'a11','a12','a21', 'a22', 'b1', 'b2', 'c1', 'c2', 'd'});
+
+disp('----------------------------------------------------------------------------');
+disp('Filter Coefficients Fixed Point')
+disp(T_fixed)
+disp('----------------------------------------------------------------------------');
 
 %% Get the Quantized Filter
 
@@ -167,6 +194,7 @@ plot_frequency_response(save_fig, total_num_quant, total_den_quant, {'Fixed Poin
 
 %% Time Domain SNR Simulation
 % Generate a sinusoid of -6dB full scale within pass band of the filter
+%L = L-1;
 t = 0:0.01:15;
 x = 0.5*cos(0.15*pi*t);
 [y, y_1, y_2, y_3]= ...
@@ -176,16 +204,21 @@ x = 0.5*cos(0.15*pi*t);
 simulated_snr = 10*log10( sum(y(end,3:end).^2) / sum(abs(y(end,3:end) - y_quant(end,3:end)).^2) );
 disp(['Simulated SNR (dB): ', num2str(simulated_snr)]);
 
-figure
+figure('Name', 'Time Domain Simulation Results')
+yyaxis left
 plot(t, y(length(D)+1, 3:end)); hold on;
-plot(t, y_quant(length(D)+1, 3:end)); 
-plot(t, abs(y_quant(length(D)+1, 3:end) - y(length(D)+1, 3:end))); hold off;
-xlabel('Time');
+plot(t, y_quant(length(D)+1, 3:end), 'r'); hold off;
+legend('Floating Point', 'Fixed Point')
+xlabel('Samples');
 ylabel('Output Amplitude');
+ylim([-1 1])
+yyaxis right
+plot(t, abs(y_quant(length(D)+1, 3:end) - y(length(D)+1, 3:end)));
+ylabel('Sample Error in Amplitude')
+ylim([0 0.001])
 legend('Floating Point', 'Fixed Point', 'Difference')
 title('Time Domain Analysis')
 grid on;
-ylim([-1 1])
 set(gca, 'FontSize', 16)
 
 % Compute the Used Adders and Mutipliers Etc:
@@ -199,8 +232,8 @@ function [y, y_1, y_2, y_3] = time_domain_sim(A,B,C,D,k,x,L)
     y(1,3:end) = x;
     % Store output of each State Matrix and the "d" path in a cascade 
     y_1 = zeros(length(D)+1, length(x)+2); % "d" path
-    y_2 = zeros(length(D)+1, length(x)+2); % State Matrix 1 (eq x in report)
-    y_3 = zeros(length(D)+1, length(x)+2); % State Matrix 2 (eq y in report)
+    y_2 = zeros(length(D)+1, length(x)+2); % State Matrix 1 (eq u_1 in report)
+    y_3 = zeros(length(D)+1, length(x)+2); % State Matrix 2 (eq u_2 in report)
 
     % If bit length is not defined then use floating point numbers
     if nargin == 6
@@ -258,14 +291,14 @@ end
 function [total_basic_logic] = calc_hardware_usage(input_mult, output_mult, ...
     num_cascades, num_add_cas, num_mult_cas, num_reg_cas, num_bits_mag)
 
-total_bits = num_bits_mag + 1;
+    total_bits = num_bits_mag + 1;
 
-total_basic_logic = (input_mult + output_mult) * 2 * total_bits^2;
+    total_basic_logic = (input_mult + output_mult) * 2 * total_bits^2;
 
-total_basic_logic = total_basic_logic ...
-    + (num_cascades * num_add_cas * 4 * total_bits) ...
-    + (num_cascades * num_mult_cas * 2 * total_bits^2) ...
-    + (num_cascades * num_reg_cas * 5 * total_bits);
+    total_basic_logic = total_basic_logic ...
+        + (num_cascades * num_add_cas * 4 * total_bits) ...
+        + (num_cascades * num_mult_cas * 2 * total_bits^2) ...
+        + (num_cascades * num_reg_cas * 5 * total_bits);
 
 end
 
@@ -307,10 +340,10 @@ for i = 1:size(fixed_point_arr, 1)
             if bitget(fixed_value, mag_length + 1) % Check the sign bit
                 % Negative number
                 magnitude = bitset(fixed_value, mag_length + 1, 0); % Clear the sign bit
-                floating_point_arr(i,j,k) = -double(magnitude) / scale_factor;
+                floating_point_arr(i,j,k) = -magnitude / scale_factor;
             else
                 % Positive number
-                floating_point_arr(i,j,k) = double(fixed_value) / scale_factor;
+                floating_point_arr(i,j,k) = fixed_value / scale_factor;
             end
         end
     end
@@ -349,9 +382,11 @@ noise_out = k^2;
 gain_per_state_space = zeros(length(D),2);
 for i = 1:M
     state_space_1 = [0, B(i,1), (A(1,2,i)*B(i,2) - A(2,2,i)*B(i,1));...
-        1, -1*trace(A(:,:,2)), det(A(:,:,i))];
+        1, -1*trace(A(:,:,i)), det(A(:,:,i))];
+    
     state_space_2 = [0, B(i,2), (A(2,1,i)*B(i,1) - A(1,1,i)*B(i,2));...
         1, -1*trace(A(:,:,2)), det(A(:,:,i))];
+    
     H_num = [1];
     H_den = [1];
     for j = (i+1):M
@@ -374,7 +409,7 @@ for i = 1:M
     % into the full transfer function (could make this 2 in my case since d
     % is never a "multiplier"
     noise_out = noise_out + (2*filternorm(state_space_1(1,:), state_space_1(2,:),2)^2 + 2*filternorm(state_space_2(1,:), state_space_2(2,:),2)^2+ 3) ...
-        * filternorm(H_num, H_den,inf)^2; 
+        * filternorm(H_num, H_den,2)^2; 
 end
 % Multiply by q^2/12 but just 1/12 here as we know q^2 is in the sinusoid
 % used for the SNR calculation
@@ -466,7 +501,7 @@ function plot_impulse(save_fig, domain, num, den, plot_title)
     title(plot_title)
     set(gca, 'FontSize', 16)
     if max(tout) > 200
-        xlim([0,200])
+        xlim([0,100])
     end
     
     if save_fig
@@ -511,4 +546,79 @@ function plot_frequency_response(save_fig, num, den, plot_title, fs)
         plot_save = "./SimieleMattProjectPlots/" + plot_save;
         print(fig_fr,plot_save,'-dpng')
     end
+end
+%% Function to do Digital Transformations
+
+function [num_out, den_out, transMatrix] = filter_z_transform(filter_type, num_in, den_in, c1, c2)
+    % Computes the numerator, denominator, and transformation matrix for a given 
+    % digital filter transformation 
+    
+    % Check if num_in and den_in have the same order
+    if length(num_in) ~= length(den_in)
+        error('Transfer function does not have the same order in den and numerator!');
+    else 
+        order = length(num_in)-1;
+    end
+
+    if strcmp(filter_type, 'lp')
+        [num_trans, den_trans] = lp2lp_z_transform(c1);
+    elseif strcmp(filter_type, 'hp')
+        [num_trans, den_trans] = lp2hp_z_transform(c1);
+    elseif strcmp(filter_type, 'bp')
+        [num_trans, den_trans] = lp2bp_z_transform(c1, c2);
+    elseif strcmp(filter_type, 'bs')
+        [num_trans, den_trans] = lp2bs_z_transform(c1, c2);
+    else
+        error('Desired filter type is not supported. Please use: lp, hp, bp, or bs!');
+    end
+
+    transMatrix = compute_transfer_matrix(num_trans, den_trans, order);
+    
+    [num_out, den_out] = compute_output_transfer_func(transMatrix, num_in, den_in);
+end
+
+function [num_trans, den_trans] = lp2lp_z_transform(c1)
+    num_trans = [-1*c1, 1];
+    den_trans = [1, -1*c1];
+end
+
+function [num_trans, den_trans] = lp2hp_z_transform(c1)
+    num_trans = [-1*c1, -1];
+    den_trans = [1, c1];
+end
+
+function [num_trans, den_trans] = lp2bp_z_transform(c1, c2)
+    num_trans = -1.*[(c2-1), -2*c1*c2, (c2+1)];
+    den_trans = [(c2+1), -2*c1*c2, (c2-1)];
+end
+
+function [num_trans, den_trans] = lp2bs_z_transform(c1, c2)
+    num_trans = [(1-c2), -2*c1, (1+c2)];
+    den_trans = [(1+c2), -2*c1, (1-c2)];
+end
+
+function transMatrix = compute_transfer_matrix(num, den, order)
+    transMatrix = zeros(order+1, (order * (length(num) - 1)) + 1);
+    for i = 1:order+1
+        num_conv = 1;
+        den_conv = 1;
+        for j = 1:i-1
+            num_conv = conv(num_conv, num);
+        end
+        for j = 1:order - i + 1
+            den_conv = conv(den_conv, den);
+        end
+        transMatrix(i,:) = conv(num_conv, den_conv);
+    end
+end
+
+function [num_out, den_out] = compute_output_transfer_func(transMatrix, num, den)
+    num_out = zeros(size(transMatrix(1,:)));
+    den_out = zeros(size(transMatrix(1,:)));
+    for i = 1:length(num)
+       den_out = den_out + den(i) * transMatrix(i,:);
+       num_out = num_out + num(i) * transMatrix(i,:);  
+    end
+    num_out = num_out / den_out(1);
+    den_out = den_out / den_out(1);
 end
